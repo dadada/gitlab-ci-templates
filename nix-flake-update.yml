@@ -52,4 +52,3 @@
   rules:
     # Only run on scheduled pipelines.
     - if: $CI_PIPELINE_SOURCE == "schedule"
-
