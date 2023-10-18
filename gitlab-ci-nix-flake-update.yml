@@ -1,0 +1,55 @@
+# # GitLab CI job template for `nix flake update --commit-lock-file`
+#
+# This requires a masked or protected variable `UPDATE_ACCESS_TOKEN` that contains a project access token with at least the scope `api` and `write_repository`.
+# The job is intended to be run from a scheduled pipeline. See https://docs.gitlab.com/ee/ci/pipelines/schedules.html
+#
+# ## Example
+#
+# ```
+# include:
+#   - https://gist.github.com/dadada/c9184fef6dc7b66c8e94ecf65783ce43/raw
+# nix-flake-update:
+#   variables:
+#     # The name of the branch that will have the updates.
+#     BRANCH: update-flake-inputs
+#     NOTIFY_USERS: "@admin"
+#   stage: update
+#   extends: .nix-flake-update
+# ```
+
+.nix-flake-update:
+  # NixOS Docker image
+  image: nixos/nix
+  script:
+    nix flake update --commit-lock-file
+  before_script:
+    # Enable support for flakes.
+    - echo "experimental-features = nix-command flakes" >> /etc/nix/nix.conf
+    # Use the vendored nixpkgs version.
+    - nix registry add nixpkgs path:$(readlink -f ${NIX_PATH%%:*}/nixpkgs)
+    # Install jq for processing MR.
+    - nix profile install nixpkgs#jq nixpkgs#gnused
+    # Set up git.
+    - git config user.email "noreply@${CI_SERVER_HOST}"
+    - git config user.name "Update Flakes"
+    - git remote remove gitlab_origin || true
+    - git remote add gitlab_origin "https://oauth2:${UPDATE_ACCESS_TOKEN}@${CI_SERVER_HOST}/${CI_PROJECT_PATH}.git"
+    - git fetch gitlab_origin main
+  after_script:
+    - |
+      if git diff --exit-code HEAD gitlab_origin/main
+      then
+        exit
+      fi
+      # Upload changes to merge request.
+      git push -f gitlab_origin HEAD:refs/heads/${BRANCH}
+      PROJECT_PATH="$(sed 's/\//%2F/g' <<< $CI_PROJECT_PATH)"
+      MR_ID=$(curl --silent --header "PRIVATE-TOKEN: ${UPDATE_ACCESS_TOKEN}" "${CI_API_V4_URL}/projects/${PROJECT_PATH}/merge_requests?source_branch=${BRANCH}&state=opened" | jq '.[0].id')
+      if [ "$MR_ID" = "null" ]
+      then
+        curl --fail --json "{\"source_branch\": \"$BRANCH\", \"target_branch\": \"main\", \"title\": \"Update inputs\", \"should_remove_source_branch\": true, \"description\": \"$NOTIFY_USERS\"}" --header "PRIVATE-TOKEN: ${UPDATE_ACCESS_TOKEN}" "${CI_API_V4_URL}/projects/${PROJECT_PATH}/merge_requests"
+      fi
+  rules:
+    # Only run on scheduled pipelines.
+    - if: $CI_PIPELINE_SOURCE == "schedule"
+
